@@ -10,47 +10,72 @@ import { StorageManager } from './storage/StorageManager';
 const storageManager = new StorageManager();
 
 // Handle extension installation
-chrome.runtime.onInstalled.addListener((details) => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   if (details.reason === 'install') {
     console.log('Extension installed');
-    // Initialize default settings
-    storageManager.savePreferences({
+    
+    // Set default preferences
+    await storageManager.savePreferences({
       language: 'en',
       signLanguage: 'ASL',
-      avatarCustomization: {
-        skinTone: 'default',
-        clothing: 'default',
-        hairStyle: 'default'
-      }
+      avatarSkinTone: 'medium',
+      avatarClothing: 'casual',
+      avatarSize: 'medium'
     });
-  } else if (details.reason === 'update') {
-    console.log('Extension updated');
+    
+    // Preload avatar assets
+    await preloadAvatarAssets();
   }
 });
 
-// Handle messages from content scripts
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.type === 'START_TRANSCRIPTION') {
-    // Start transcription service
-    console.log('Starting transcription');
-    sendResponse({ success: true });
-  } else if (request.type === 'STOP_TRANSCRIPTION') {
-    // Stop transcription service
-    console.log('Stopping transcription');
-    sendResponse({ success: true });
-  } else if (request.type === 'GET_PREFERENCES') {
-    // Get user preferences
-    storageManager.loadPreferences().then(prefs => {
-      sendResponse({ preferences: prefs });
-    });
-    return true; // Keep channel open for async response
+// Handle messages from content script
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  switch (message.type) {
+    case 'START_TRANSCRIPTION':
+      handleStartTranscription(message.data);
+      break;
+    case 'STOP_TRANSCRIPTION':
+      handleStopTranscription();
+      break;
+    case 'GET_PREFERENCES':
+      handleGetPreferences(sendResponse);
+      return true; // Keep channel open for async response
+    case 'SAVE_PREFERENCES':
+      handleSavePreferences(message.data, sendResponse);
+      return true;
+    default:
+      console.warn('Unknown message type:', message.type);
   }
 });
 
-// Handle extension icon click
-chrome.action.onClicked.addListener((tab) => {
-  // Open extension popup or toggle transcription
-  console.log('Extension icon clicked');
+async function handleStartTranscription(data: any) {
+  console.log('Starting transcription', data);
+  // WebSocket connection will be managed by content script
+}
+
+function handleStopTranscription() {
+  console.log('Stopping transcription');
+}
+
+async function handleGetPreferences(sendResponse: (response: any) => void) {
+  const preferences = await storageManager.loadPreferences();
+  sendResponse({ success: true, data: preferences });
+}
+
+async function handleSavePreferences(data: any, sendResponse: (response: any) => void) {
+  await storageManager.savePreferences(data);
+  sendResponse({ success: true });
+}
+
+async function preloadAvatarAssets() {
+  // Preload avatar assets during installation
+  console.log('Preloading avatar assets');
+  // Implementation would fetch and cache avatar assets
+}
+
+// Keep service worker alive
+chrome.runtime.onStartup.addListener(() => {
+  console.log('Extension started');
 });
 
-console.log('Background script loaded');
+export {};

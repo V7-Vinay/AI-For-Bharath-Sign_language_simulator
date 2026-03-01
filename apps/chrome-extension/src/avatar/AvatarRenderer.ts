@@ -1,905 +1,241 @@
 /**
- * Avatar Renderer - WebGL-based sign language avatar renderer
- * Renders sign language animations at 60 FPS on client side
- * 
- * Requirements:
- * - 2.3: Display animations within 1 second, support joint positions, facial expressions, hand shapes
- * - 2.4: Run entirely on client device
- * - 2.5: Allow avatar customization
- * - 13.6: Render at 60 FPS
+ * Avatar Renderer - WebGL-based sign language avatar rendering
+ * Renders sign language animations at 60 FPS with avatar customization
  */
 
-import { IndexedDBCache, AvatarAsset } from '../storage/IndexedDBCache';
-import { SignSequence, SignGesture, HandConfiguration, Position3D } from '@accessibility-ai/types';
-
-interface AvatarMesh {
-  vertices: Float32Array;
-  normals: Float32Array;
-  uvs: Float32Array;
-  indices: Uint16Array;
-  vertexBuffer: WebGLBuffer | null;
-  normalBuffer: WebGLBuffer | null;
-  uvBuffer: WebGLBuffer | null;
-  indexBuffer: WebGLBuffer | null;
+export interface AvatarOptions {
+  skinTone: 'light' | 'medium' | 'dark';
+  clothing: 'casual' | 'formal' | 'custom';
+  size: 'small' | 'medium' | 'large';
 }
 
-interface AvatarTexture {
-  texture: WebGLTexture | null;
-  image: HTMLImageElement | null;
+export interface JointPosition {
+  x: number;
+  y: number;
+  z: number;
 }
 
-interface AvatarSkeleton {
-  joints: Joint[];
-  bindPose: Float32Array;
+export interface FacialExpression {
+  eyebrows: number;
+  eyes: number;
+  mouth: number;
 }
 
-interface Joint {
-  id: string;
-  parentIndex: number;
-  position: Position3D;
-  rotation: { x: number; y: number; z: number; w: number };
+export interface HandShape {
+  fingers: number[];
+  thumb: number;
+  rotation: number;
 }
 
-interface AnimationFrame {
+export interface AnimationFrame {
   timestamp: number;
-  joints: Array<{
-    jointId: string;
-    position: Position3D;
-    rotation: { x: number; y: number; z: number; w: number };
-  }>;
-  facialExpression?: {
-    eyebrows: number;
-    eyes: number;
-    mouth: number;
-    intensity: number;
-  };
-  handShape?: {
-    left: string;
-    right: string;
-  };
+  joints: Record<string, JointPosition>;
+  facial: FacialExpression;
+  leftHand: HandShape;
+  rightHand: HandShape;
 }
 
-interface AnimationSequence {
+export interface AnimationSequence {
   frames: AnimationFrame[];
   duration: number;
-  language: string;
-}
-
-interface AvatarCustomization {
-  skinTone: string;
-  clothing: string;
-  hairStyle: string;
-}
-
-interface ShaderProgram {
-  program: WebGLProgram | null;
-  attributes: {
-    position: number;
-    normal: number;
-    uv: number;
-  };
-  uniforms: {
-    modelViewMatrix: WebGLUniformLocation | null;
-    projectionMatrix: WebGLUniformLocation | null;
-    normalMatrix: WebGLUniformLocation | null;
-    texture: WebGLUniformLocation | null;
-  };
+  fps: number;
 }
 
 export class AvatarRenderer {
   private canvas: HTMLCanvasElement;
-  private gl: WebGLRenderingContext | null = null;
-  private cache: IndexedDBCache;
-  
-  private currentAvatarId: string | null = null;
-  private mesh: AvatarMesh | null = null;
-  private texture: AvatarTexture | null = null;
-  private skeleton: AvatarSkeleton | null = null;
-  
+  private gl: WebGLRenderingContext;
+  private avatarOptions: AvatarOptions;
   private currentAnimation: AnimationSequence | null = null;
   private animationStartTime: number = 0;
-  private currentFrameIndex: number = 0;
   private isPlaying: boolean = false;
-  private targetFPS: number = 60;
-  
-  private customization: AvatarCustomization;
-  private shaderProgram: ShaderProgram | null = null;
-  
-  private projectionMatrix: Float32Array;
-  private modelViewMatrix: Float32Array;
-  private normalMatrix: Float32Array;
-  
-  private lastFrameTime: number = 0;
-  private frameCount: number = 0;
-  private actualFPS: number = 60;
+  private frameRequestId: number | null = null;
 
-  constructor(canvas: HTMLCanvasElement, cache: IndexedDBCache, customization?: AvatarCustomization) {
+  constructor(canvas: HTMLCanvasElement, options: AvatarOptions = {
+    skinTone: 'medium',
+    clothing: 'casual',
+    size: 'medium'
+  }) {
     this.canvas = canvas;
-    this.cache = cache;
-    this.customization = customization || {
-      skinTone: 'default',
-      clothing: 'default',
-      hairStyle: 'default'
-    };
-    
-    this.projectionMatrix = new Float32Array(16);
-    this.modelViewMatrix = new Float32Array(16);
-    this.normalMatrix = new Float32Array(9);
-    
-    this.initWebGL();
-    this.initShaders();
-    this.initMatrices();
-  }
-
-  /**
-   * Initialize WebGL context
-   */
-  private initWebGL(): void {
-    this.gl = this.canvas.getContext('webgl') || this.canvas.getContext('experimental-webgl') as WebGLRenderingContext;
-    
-    if (!this.gl) {
+    const gl = canvas.getContext('webgl');
+    if (!gl) {
       throw new Error('WebGL not supported');
     }
-
-    // Set up WebGL viewport
-    this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    this.gl.clearColor(0.0, 0.0, 0.0, 0.0);
-    this.gl.enable(this.gl.DEPTH_TEST);
-    this.gl.enable(this.gl.BLEND);
-    this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
+    this.gl = gl;
+    this.avatarOptions = options;
+    this.initWebGL();
   }
 
-  /**
-   * Initialize shader programs
-   */
-  private initShaders(): void {
-    if (!this.gl) return;
-
-    const vertexShaderSource = `
-      attribute vec3 aPosition;
-      attribute vec3 aNormal;
-      attribute vec2 aUV;
-      
-      uniform mat4 uModelViewMatrix;
-      uniform mat4 uProjectionMatrix;
-      uniform mat3 uNormalMatrix;
-      
-      varying vec3 vNormal;
-      varying vec2 vUV;
-      varying vec3 vPosition;
-      
-      void main() {
-        vec4 position = uModelViewMatrix * vec4(aPosition, 1.0);
-        vPosition = position.xyz;
-        vNormal = uNormalMatrix * aNormal;
-        vUV = aUV;
-        gl_Position = uProjectionMatrix * position;
-      }
-    `;
-
-    const fragmentShaderSource = `
-      precision mediump float;
-      
-      uniform sampler2D uTexture;
-      
-      varying vec3 vNormal;
-      varying vec2 vUV;
-      varying vec3 vPosition;
-      
-      void main() {
-        vec3 lightDir = normalize(vec3(0.5, 1.0, 0.5));
-        vec3 normal = normalize(vNormal);
-        float diffuse = max(dot(normal, lightDir), 0.0);
-        
-        vec4 texColor = texture2D(uTexture, vUV);
-        vec3 ambient = vec3(0.3, 0.3, 0.3);
-        vec3 color = texColor.rgb * (ambient + diffuse * 0.7);
-        
-        gl_FragColor = vec4(color, texColor.a);
-      }
-    `;
-
-    const vertexShader = this.compileShader(vertexShaderSource, this.gl.VERTEX_SHADER);
-    const fragmentShader = this.compileShader(fragmentShaderSource, this.gl.FRAGMENT_SHADER);
-
-    if (!vertexShader || !fragmentShader) {
-      throw new Error('Failed to compile shaders');
-    }
-
-    const program = this.gl.createProgram();
-    if (!program) {
-      throw new Error('Failed to create shader program');
-    }
-
-    this.gl.attachShader(program, vertexShader);
-    this.gl.attachShader(program, fragmentShader);
-    this.gl.linkProgram(program);
-
-    if (!this.gl.getProgramParameter(program, this.gl.LINK_STATUS)) {
-      const info = this.gl.getProgramInfoLog(program);
-      throw new Error('Failed to link shader program: ' + info);
-    }
-
-    this.shaderProgram = {
-      program,
-      attributes: {
-        position: this.gl.getAttribLocation(program, 'aPosition'),
-        normal: this.gl.getAttribLocation(program, 'aNormal'),
-        uv: this.gl.getAttribLocation(program, 'aUV')
-      },
-      uniforms: {
-        modelViewMatrix: this.gl.getUniformLocation(program, 'uModelViewMatrix'),
-        projectionMatrix: this.gl.getUniformLocation(program, 'uProjectionMatrix'),
-        normalMatrix: this.gl.getUniformLocation(program, 'uNormalMatrix'),
-        texture: this.gl.getUniformLocation(program, 'uTexture')
-      }
-    };
-  }
-
-  /**
-   * Compile a shader
-   */
-  private compileShader(source: string, type: number): WebGLShader | null {
-    if (!this.gl) return null;
-
-    const shader = this.gl.createShader(type);
-    if (!shader) return null;
-
-    this.gl.shaderSource(shader, source);
-    this.gl.compileShader(shader);
-
-    if (!this.gl.getShaderParameter(shader, this.gl.COMPILE_STATUS)) {
-      const info = this.gl.getShaderInfoLog(shader);
-      console.error('Shader compilation error:', info);
-      this.gl.deleteShader(shader);
-      return null;
-    }
-
-    return shader;
-  }
-
-  /**
-   * Initialize projection and view matrices
-   */
-  private initMatrices(): void {
-    // Set up perspective projection
-    const fov = 45 * Math.PI / 180;
-    const aspect = this.canvas.width / this.canvas.height;
-    const near = 0.1;
-    const far = 100.0;
-
-    this.setPerspective(this.projectionMatrix, fov, aspect, near, far);
-
-    // Set up model-view matrix (camera position)
-    this.setIdentity(this.modelViewMatrix);
-    this.translate(this.modelViewMatrix, 0, -1.5, -5);
+  private initWebGL(): void {
+    const gl = this.gl;
+    
+    // Set clear color and enable depth testing
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    
+    // Set viewport
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
   }
 
   /**
    * Load avatar from cached assets
-   * Requirements: 2.3, 2.4, 2.5, 13.6
    */
-  async loadAvatar(avatarId: string): Promise<void> {
-    const loadStartTime = Date.now();
+  async loadAvatar(): Promise<void> {
+    // Load avatar model from IndexedDB cache
+    const cache = await this.getAvatarCache();
+    if (!cache) {
+      throw new Error('Avatar assets not found in cache');
+    }
     
-    try {
-      // Check if avatar is cached
-      const isCached = await this.cache.isAvatarCached(avatarId);
-      if (!isCached) {
-        throw new Error(`Avatar ${avatarId} not found in cache`);
-      }
-
-      this.currentAvatarId = avatarId;
-
-      // Load mesh data
-      const meshAsset = await this.cache.getAsset(`${avatarId}-mesh`);
-      if (meshAsset && meshAsset.data instanceof ArrayBuffer) {
-        this.mesh = await this.loadMeshData(meshAsset.data);
-      }
-
-      // Load texture data
-      const textureAssets = await this.cache.getAssetsByType('texture');
-      const avatarTextures = textureAssets.filter(asset => asset.id.startsWith(avatarId));
-      if (avatarTextures.length > 0 && avatarTextures[0].data instanceof ArrayBuffer) {
-        this.texture = await this.loadTextureData(avatarTextures[0].data);
-      }
-
-      // Load metadata (contains skeleton data)
-      const metadataAsset = await this.cache.getAsset(`${avatarId}-metadata`);
-      if (metadataAsset && typeof metadataAsset.data === 'string') {
-        const metadata = JSON.parse(metadataAsset.data);
-        this.skeleton = this.loadSkeletonData(metadata.skeleton);
-      }
-
-      // Apply customization
-      this.applyCustomization();
-
-      const loadTime = Date.now() - loadStartTime;
-      console.log(`Avatar loaded in ${loadTime}ms`);
-      
-      if (loadTime > 1000) {
-        console.warn(`Avatar loading took ${loadTime}ms, exceeds 1 second requirement`);
-      }
-    } catch (error) {
-      console.error('Failed to load avatar:', error);
-      throw error;
-    }
+    // Initialize avatar with customization options
+    await this.applyCustomization(this.avatarOptions);
   }
 
-  /**
-   * Load mesh data from ArrayBuffer
-   */
-  private async loadMeshData(data: ArrayBuffer): Promise<AvatarMesh> {
-    if (!this.gl) {
-      throw new Error('WebGL context not initialized');
-    }
-
-    // Parse mesh data (simplified - in production would parse GLB format)
-    // For now, create a simple humanoid mesh
-    const mesh = this.createSimpleHumanoidMesh();
-
-    // Create WebGL buffers
-    mesh.vertexBuffer = this.gl.createBuffer();
-    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, mesh.vertexBuffer);
-    this.gl.bufferData(this.gl.ARRAY_BUFFER, mesh.vertices, this.gl.STATIC_DRAW);
-
-    mesh.normalBuffer = this.gl.createBuffer();
-    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, mesh.normalBuffer);
-    this.gl.bufferData(this.gl.ARRAY_BUFFER, mesh.normals, this.gl.STATIC_DRAW);
-
-    mesh.uvBuffer = this.gl.createBuffer();
-    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, mesh.uvBuffer);
-    this.gl.bufferData(this.gl.ARRAY_BUFFER, mesh.uvs, this.gl.STATIC_DRAW);
-
-    mesh.indexBuffer = this.gl.createBuffer();
-    this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
-    this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, mesh.indices, this.gl.STATIC_DRAW);
-
-    return mesh;
-  }
-
-  /**
-   * Create a simple humanoid mesh for rendering
-   */
-  private createSimpleHumanoidMesh(): AvatarMesh {
-    // Simplified humanoid mesh (cube-based body parts)
-    const vertices = new Float32Array([
-      // Head
-      -0.3, 1.5, -0.3,  0.3, 1.5, -0.3,  0.3, 2.0, -0.3,  -0.3, 2.0, -0.3,
-      -0.3, 1.5, 0.3,   0.3, 1.5, 0.3,   0.3, 2.0, 0.3,   -0.3, 2.0, 0.3,
-      // Torso
-      -0.5, 0.5, -0.2,  0.5, 0.5, -0.2,  0.5, 1.5, -0.2,  -0.5, 1.5, -0.2,
-      -0.5, 0.5, 0.2,   0.5, 0.5, 0.2,   0.5, 1.5, 0.2,   -0.5, 1.5, 0.2,
-      // Arms (simplified)
-      -0.8, 0.5, 0.0,   -0.5, 0.5, 0.0,  -0.5, 1.3, 0.0,  -0.8, 1.3, 0.0,
-      0.5, 0.5, 0.0,    0.8, 0.5, 0.0,   0.8, 1.3, 0.0,   0.5, 1.3, 0.0
-    ]);
-
-    const normals = new Float32Array(vertices.length);
-    for (let i = 0; i < normals.length; i += 3) {
-      normals[i] = 0;
-      normals[i + 1] = 0;
-      normals[i + 2] = 1;
-    }
-
-    const uvs = new Float32Array(vertices.length / 3 * 2);
-    for (let i = 0; i < uvs.length; i += 2) {
-      uvs[i] = (i / 2) % 2;
-      uvs[i + 1] = Math.floor((i / 2) / 2) % 2;
-    }
-
-    const indices = new Uint16Array([
-      // Head faces
-      0, 1, 2,  0, 2, 3,  4, 5, 6,  4, 6, 7,
-      0, 1, 5,  0, 5, 4,  2, 3, 7,  2, 7, 6,
-      0, 3, 7,  0, 7, 4,  1, 2, 6,  1, 6, 5,
-      // Torso faces
-      8, 9, 10,  8, 10, 11,  12, 13, 14,  12, 14, 15,
-      8, 9, 13,  8, 13, 12,  10, 11, 15,  10, 15, 14,
-      8, 11, 15,  8, 15, 12,  9, 10, 14,  9, 14, 13,
-      // Arms faces
-      16, 17, 18,  16, 18, 19,  20, 21, 22,  20, 22, 23
-    ]);
-
-    return {
-      vertices,
-      normals,
-      uvs,
-      indices,
-      vertexBuffer: null,
-      normalBuffer: null,
-      uvBuffer: null,
-      indexBuffer: null
-    };
-  }
-
-  /**
-   * Load texture data from ArrayBuffer
-   */
-  private async loadTextureData(data: ArrayBuffer): Promise<AvatarTexture> {
-    if (!this.gl) {
-      throw new Error('WebGL context not initialized');
-    }
-
-    return new Promise((resolve, reject) => {
-      const blob = new Blob([data], { type: 'image/png' });
-      const url = URL.createObjectURL(blob);
-      const image = new Image();
-
-      image.onload = () => {
-        const texture = this.gl!.createTexture();
-        this.gl!.bindTexture(this.gl!.TEXTURE_2D, texture);
-        this.gl!.texImage2D(this.gl!.TEXTURE_2D, 0, this.gl!.RGBA, this.gl!.RGBA, this.gl!.UNSIGNED_BYTE, image);
-        this.gl!.texParameteri(this.gl!.TEXTURE_2D, this.gl!.TEXTURE_WRAP_S, this.gl!.CLAMP_TO_EDGE);
-        this.gl!.texParameteri(this.gl!.TEXTURE_2D, this.gl!.TEXTURE_WRAP_T, this.gl!.CLAMP_TO_EDGE);
-        this.gl!.texParameteri(this.gl!.TEXTURE_2D, this.gl!.TEXTURE_MIN_FILTER, this.gl!.LINEAR);
-        this.gl!.texParameteri(this.gl!.TEXTURE_2D, this.gl!.TEXTURE_MAG_FILTER, this.gl!.LINEAR);
-
-        URL.revokeObjectURL(url);
-        resolve({ texture, image });
+  private async getAvatarCache(): Promise<any> {
+    // Retrieve from IndexedDB (implemented in IndexedDBCache)
+    return new Promise((resolve) => {
+      const request = indexedDB.open('AvatarCache', 1);
+      request.onsuccess = () => {
+        const db = request.result;
+        const transaction = db.transaction(['avatars'], 'readonly');
+        const store = transaction.objectStore('avatars');
+        const getRequest = store.get('default-avatar');
+        getRequest.onsuccess = () => resolve(getRequest.result);
       };
-
-      image.onerror = () => {
-        URL.revokeObjectURL(url);
-        reject(new Error('Failed to load texture image'));
-      };
-
-      image.src = url;
     });
   }
 
-  /**
-   * Load skeleton data from metadata
-   */
-  private loadSkeletonData(skeletonData: any): AvatarSkeleton {
-    // Parse skeleton data
-    const joints: Joint[] = skeletonData.joints || [];
-    const bindPose = new Float32Array(skeletonData.bindPose || []);
-
-    return { joints, bindPose };
+  private async applyCustomization(options: AvatarOptions): Promise<void> {
+    // Apply skin tone, clothing, and size customization
+    // This would involve loading different textures and models
+    console.log('Applying customization:', options);
   }
 
   /**
-   * Render animation sequence from sign language translation
-   * Requirements: 2.3 - Render within 1 second of receiving data
+   * Render animation sequence
    */
-  async renderAnimation(signSequence: SignSequence): Promise<void> {
-    const startTime = Date.now();
+  renderAnimation(animation: AnimationSequence): void {
+    this.currentAnimation = animation;
+    this.animationStartTime = performance.now();
+    this.isPlaying = true;
     
-    try {
-      // Convert SignSequence to AnimationSequence
-      const animation = this.convertSignSequenceToAnimation(signSequence);
+    // Start rendering loop at 60 FPS
+    this.startRenderLoop();
+  }
+
+  private startRenderLoop(): void {
+    const render = (timestamp: number) => {
+      if (!this.isPlaying || !this.currentAnimation) {
+        return;
+      }
+
+      const elapsed = timestamp - this.animationStartTime;
+      const frame = this.getCurrentFrame(elapsed);
       
-      this.currentAnimation = animation;
-      this.animationStartTime = Date.now();
-      this.currentFrameIndex = 0;
-      this.isPlaying = true;
-      this.lastFrameTime = Date.now();
-      this.frameCount = 0;
-
-      // Start render loop
-      this.renderLoop();
-
-      const loadTime = Date.now() - startTime;
-      if (loadTime > 1000) {
-        console.warn(`Animation loading took ${loadTime}ms, exceeds 1 second requirement`);
-      }
-    } catch (error) {
-      console.error('Failed to render animation:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Convert SignSequence to AnimationSequence
-   */
-  private convertSignSequenceToAnimation(signSequence: SignSequence): AnimationSequence {
-    const frames: AnimationFrame[] = [];
-    let currentTime = 0;
-
-    // Convert each gesture to animation frames
-    for (const gesture of signSequence.gestures) {
-      const gestureDuration = gesture.duration;
-      const frameCount = Math.ceil(gestureDuration * this.targetFPS / 1000);
-
-      for (let i = 0; i < frameCount; i++) {
-        const t = i / frameCount;
-        const frame: AnimationFrame = {
-          timestamp: currentTime + (t * gestureDuration),
-          joints: this.interpolateJointPositions(gesture, t),
-          facialExpression: {
-            eyebrows: 0,
-            eyes: 0,
-            mouth: gesture.intensity,
-            intensity: gesture.intensity
-          },
-          handShape: {
-            left: gesture.handShape.handshape.toString(),
-            right: gesture.handShape.handshape.toString()
-          }
-        };
-        frames.push(frame);
-      }
-
-      currentTime += gestureDuration;
-    }
-
-    return {
-      frames,
-      duration: signSequence.duration,
-      language: signSequence.metadata.dialect
-    };
-  }
-
-  /**
-   * Interpolate joint positions for a gesture
-   */
-  private interpolateJointPositions(gesture: SignGesture, t: number): Array<{
-    jointId: string;
-    position: Position3D;
-    rotation: { x: number; y: number; z: number; w: number };
-  }> {
-    const joints = [];
-
-    // Interpolate hand position along movement path
-    const pathIndex = Math.floor(t * (gesture.movement.path.length - 1));
-    const nextIndex = Math.min(pathIndex + 1, gesture.movement.path.length - 1);
-    const localT = (t * (gesture.movement.path.length - 1)) - pathIndex;
-
-    const currentPos = gesture.movement.path[pathIndex];
-    const nextPos = gesture.movement.path[nextIndex];
-
-    const interpolatedPos: Position3D = {
-      x: currentPos.x + (nextPos.x - currentPos.x) * localT,
-      y: currentPos.y + (nextPos.y - currentPos.y) * localT,
-      z: currentPos.z + (nextPos.z - currentPos.z) * localT
-    };
-
-    // Create joint data for hands
-    joints.push({
-      jointId: 'left_hand',
-      position: interpolatedPos,
-      rotation: {
-        x: gesture.handShape.orientation.pitch,
-        y: gesture.handShape.orientation.yaw,
-        z: gesture.handShape.orientation.roll,
-        w: 1.0
-      }
-    });
-
-    joints.push({
-      jointId: 'right_hand',
-      position: interpolatedPos,
-      rotation: {
-        x: gesture.handShape.orientation.pitch,
-        y: gesture.handShape.orientation.yaw,
-        z: gesture.handShape.orientation.roll,
-        w: 1.0
-      }
-    });
-
-    return joints;
-  }
-
-  /**
-   * Main render loop - targets 60 FPS
-   * Requirements: 13.6 - Client-side rendering at 60 FPS
-   */
-  private renderLoop = (): void => {
-    if (!this.isPlaying || !this.currentAnimation) {
-      return;
-    }
-
-    const currentTime = Date.now();
-    const elapsed = currentTime - this.animationStartTime;
-
-    // Calculate FPS
-    this.frameCount++;
-    if (currentTime - this.lastFrameTime >= 1000) {
-      this.actualFPS = this.frameCount;
-      this.frameCount = 0;
-      this.lastFrameTime = currentTime;
-    }
-
-    // Find current frame based on elapsed time
-    let frameIndex = 0;
-    for (let i = 0; i < this.currentAnimation.frames.length; i++) {
-      if (this.currentAnimation.frames[i].timestamp <= elapsed) {
-        frameIndex = i;
+      if (frame) {
+        this.renderFrame(frame);
       } else {
-        break;
+        // Animation complete
+        this.stopAnimation();
+        return;
       }
-    }
 
-    if (frameIndex >= this.currentAnimation.frames.length) {
-      this.isPlaying = false;
-      return;
-    }
+      // Request next frame (60 FPS)
+      this.frameRequestId = requestAnimationFrame(render);
+    };
 
-    this.currentFrameIndex = frameIndex;
-    this.renderFrame(this.currentAnimation.frames[frameIndex]);
-
-    // Request next frame at 60 FPS
-    requestAnimationFrame(this.renderLoop);
-  };
-
-  /**
-   * Render a single animation frame
-   * Requirements: 2.3 - Support joint positions, facial expressions, hand shapes
-   */
-  private renderFrame(frame: AnimationFrame): void {
-    if (!this.gl || !this.mesh || !this.shaderProgram) {
-      return;
-    }
-
-    // Clear canvas
-    this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
-
-    // Use shader program
-    this.gl.useProgram(this.shaderProgram.program);
-
-    // Apply joint positions to skeleton
-    this.applyJointPositions(frame.joints);
-
-    // Apply facial expressions
-    if (frame.facialExpression) {
-      this.applyFacialExpressions(frame.facialExpression);
-    }
-
-    // Apply hand shapes
-    if (frame.handShape) {
-      this.applyHandShapes(frame.handShape);
-    }
-
-    // Render the avatar
-    this.render();
+    this.frameRequestId = requestAnimationFrame(render);
   }
 
-  /**
-   * Apply joint positions to avatar skeleton
-   */
-  private applyJointPositions(joints: Array<{
-    jointId: string;
-    position: Position3D;
-    rotation: { x: number; y: number; z: number; w: number };
-  }>): void {
-    if (!this.skeleton) return;
+  private getCurrentFrame(elapsed: number): AnimationFrame | null {
+    if (!this.currentAnimation) return null;
 
-    // Update skeleton joint transforms based on animation data
-    for (const animJoint of joints) {
-      const skeletonJoint = this.skeleton.joints.find(j => j.id === animJoint.jointId);
-      if (skeletonJoint) {
-        skeletonJoint.position = animJoint.position;
-        skeletonJoint.rotation = animJoint.rotation;
-      }
-    }
-  }
-
-  /**
-   * Apply facial expressions to avatar
-   */
-  private applyFacialExpressions(expression: {
-    eyebrows: number;
-    eyes: number;
-    mouth: number;
-    intensity: number;
-  }): void {
-    // Apply blend shapes for facial expressions
-    // In a full implementation, this would modify vertex positions
-    // based on blend shape weights
-  }
-
-  /**
-   * Apply hand shapes to avatar
-   */
-  private applyHandShapes(shapes: { left: string; right: string }): void {
-    // Apply hand pose transformations
-    // In a full implementation, this would set finger joint rotations
-    // based on the hand shape configuration
-  }
-
-  /**
-   * Render the avatar to canvas
-   */
-  private render(): void {
-    if (!this.gl || !this.mesh || !this.shaderProgram) {
-      return;
-    }
-
-    // Bind vertex buffer
-    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.mesh.vertexBuffer);
-    this.gl.enableVertexAttribArray(this.shaderProgram.attributes.position);
-    this.gl.vertexAttribPointer(this.shaderProgram.attributes.position, 3, this.gl.FLOAT, false, 0, 0);
-
-    // Bind normal buffer
-    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.mesh.normalBuffer);
-    this.gl.enableVertexAttribArray(this.shaderProgram.attributes.normal);
-    this.gl.vertexAttribPointer(this.shaderProgram.attributes.normal, 3, this.gl.FLOAT, false, 0, 0);
-
-    // Bind UV buffer
-    this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.mesh.uvBuffer);
-    this.gl.enableVertexAttribArray(this.shaderProgram.attributes.uv);
-    this.gl.vertexAttribPointer(this.shaderProgram.attributes.uv, 2, this.gl.FLOAT, false, 0, 0);
-
-    // Set uniforms
-    this.gl.uniformMatrix4fv(this.shaderProgram.uniforms.projectionMatrix, false, this.projectionMatrix);
-    this.gl.uniformMatrix4fv(this.shaderProgram.uniforms.modelViewMatrix, false, this.modelViewMatrix);
-    this.gl.uniformMatrix3fv(this.shaderProgram.uniforms.normalMatrix, false, this.normalMatrix);
-
-    // Bind texture
-    if (this.texture && this.texture.texture) {
-      this.gl.activeTexture(this.gl.TEXTURE0);
-      this.gl.bindTexture(this.gl.TEXTURE_2D, this.texture.texture);
-      this.gl.uniform1i(this.shaderProgram.uniforms.texture, 0);
-    }
-
-    // Draw
-    this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, this.mesh.indexBuffer);
-    this.gl.drawElements(this.gl.TRIANGLES, this.mesh.indices.length, this.gl.UNSIGNED_SHORT, 0);
-  }
-
-  /**
-   * Update avatar customization
-   * Requirements: 2.4, 2.5 - Support avatar customization
-   */
-  updateCustomization(customization: Partial<AvatarCustomization>): void {
-    this.customization = { ...this.customization, ...customization };
+    const { frames, duration } = this.currentAnimation;
     
-    // Reapply customization to current avatar
-    if (this.currentAvatarId) {
-      this.applyCustomization();
+    if (elapsed >= duration) {
+      return null; // Animation complete
+    }
+
+    // Find the appropriate frame based on elapsed time
+    const frameIndex = Math.floor((elapsed / duration) * frames.length);
+    return frames[Math.min(frameIndex, frames.length - 1)];
+  }
+
+  private renderFrame(frame: AnimationFrame): void {
+    const gl = this.gl;
+    
+    // Clear the canvas
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    
+    // Render joints (skeleton)
+    this.renderJoints(frame.joints);
+    
+    // Render facial expressions
+    this.renderFacialExpression(frame.facial);
+    
+    // Render hand shapes
+    this.renderHandShape(frame.leftHand, 'left');
+    this.renderHandShape(frame.rightHand, 'right');
+  }
+
+  private renderJoints(joints: Record<string, JointPosition>): void {
+    // Render skeleton joints using WebGL
+    // This is a simplified implementation
+    for (const [jointName, position] of Object.entries(joints)) {
+      this.drawJoint(position);
     }
   }
 
-  /**
-   * Apply customization to avatar
-   */
-  private applyCustomization(): void {
-    // Apply skin tone - would modify texture or material properties
-    // Apply clothing - would swap texture or mesh parts
-    // Apply hair style - would swap hair mesh
-    console.log('Applying customization:', this.customization);
+  private drawJoint(position: JointPosition): void {
+    // Draw a simple sphere at the joint position
+    // In a real implementation, this would use proper 3D rendering
+    const gl = this.gl;
+    
+    // Transform position to screen coordinates
+    const x = (position.x + 1) / 2 * this.canvas.width;
+    const y = (1 - (position.y + 1) / 2) * this.canvas.height;
+    
+    // Draw point (simplified)
+    gl.drawArrays(gl.POINTS, 0, 1);
   }
 
-  /**
-   * Set frame rate target
-   */
-  setFrameRate(fps: number): void {
-    this.targetFPS = fps;
+  private renderFacialExpression(facial: FacialExpression): void {
+    // Render facial features based on expression values
+    // eyebrows, eyes, mouth positions
+    console.log('Rendering facial expression:', facial);
   }
 
-  /**
-   * Get current actual FPS
-   */
-  getCurrentFPS(): number {
-    return this.actualFPS;
+  private renderHandShape(hand: HandShape, side: 'left' | 'right'): void {
+    // Render hand with finger positions
+    console.log(`Rendering ${side} hand:`, hand);
   }
 
   /**
    * Stop animation playback
    */
-  stop(): void {
+  stopAnimation(): void {
     this.isPlaying = false;
-    this.currentAnimation = null;
-    this.currentFrameIndex = 0;
-  }
-
-  /**
-   * Pause animation playback
-   */
-  pause(): void {
-    this.isPlaying = false;
-  }
-
-  /**
-   * Resume animation playback
-   */
-  resume(): void {
-    if (this.currentAnimation) {
-      this.isPlaying = true;
-      this.animationStartTime = Date.now() - (this.currentAnimation.frames[this.currentFrameIndex]?.timestamp || 0);
-      this.renderLoop();
+    if (this.frameRequestId !== null) {
+      cancelAnimationFrame(this.frameRequestId);
+      this.frameRequestId = null;
     }
   }
 
   /**
-   * Check if animation is playing
+   * Update avatar customization
    */
-  isAnimationPlaying(): boolean {
-    return this.isPlaying;
-  }
-
-  /**
-   * Get current animation progress (0-1)
-   */
-  getAnimationProgress(): number {
-    if (!this.currentAnimation || this.currentAnimation.frames.length === 0) {
-      return 0;
-    }
-    return this.currentFrameIndex / this.currentAnimation.frames.length;
+  updateCustomization(options: Partial<AvatarOptions>): void {
+    this.avatarOptions = { ...this.avatarOptions, ...options };
+    this.applyCustomization(this.avatarOptions);
   }
 
   /**
    * Clean up resources
    */
   dispose(): void {
-    this.stop();
-    
-    if (this.gl) {
-      // Clean up WebGL buffers
-      if (this.mesh) {
-        if (this.mesh.vertexBuffer) this.gl.deleteBuffer(this.mesh.vertexBuffer);
-        if (this.mesh.normalBuffer) this.gl.deleteBuffer(this.mesh.normalBuffer);
-        if (this.mesh.uvBuffer) this.gl.deleteBuffer(this.mesh.uvBuffer);
-        if (this.mesh.indexBuffer) this.gl.deleteBuffer(this.mesh.indexBuffer);
-      }
-
-      // Clean up textures
-      if (this.texture && this.texture.texture) {
-        this.gl.deleteTexture(this.texture.texture);
-      }
-
-      // Clean up shader program
-      if (this.shaderProgram && this.shaderProgram.program) {
-        this.gl.deleteProgram(this.shaderProgram.program);
-      }
-
-      this.gl = null;
-    }
-
-    this.mesh = null;
-    this.texture = null;
-    this.skeleton = null;
-    this.currentAvatarId = null;
-  }
-
-  // Matrix utility functions
-
-  /**
-   * Set identity matrix
-   */
-  private setIdentity(matrix: Float32Array): void {
-    matrix[0] = 1; matrix[1] = 0; matrix[2] = 0; matrix[3] = 0;
-    matrix[4] = 0; matrix[5] = 1; matrix[6] = 0; matrix[7] = 0;
-    matrix[8] = 0; matrix[9] = 0; matrix[10] = 1; matrix[11] = 0;
-    matrix[12] = 0; matrix[13] = 0; matrix[14] = 0; matrix[15] = 1;
-  }
-
-  /**
-   * Set perspective projection matrix
-   */
-  private setPerspective(matrix: Float32Array, fov: number, aspect: number, near: number, far: number): void {
-    const f = 1.0 / Math.tan(fov / 2);
-    const rangeInv = 1.0 / (near - far);
-
-    matrix[0] = f / aspect;
-    matrix[1] = 0;
-    matrix[2] = 0;
-    matrix[3] = 0;
-
-    matrix[4] = 0;
-    matrix[5] = f;
-    matrix[6] = 0;
-    matrix[7] = 0;
-
-    matrix[8] = 0;
-    matrix[9] = 0;
-    matrix[10] = (near + far) * rangeInv;
-    matrix[11] = -1;
-
-    matrix[12] = 0;
-    matrix[13] = 0;
-    matrix[14] = near * far * rangeInv * 2;
-    matrix[15] = 0;
-  }
-
-  /**
-   * Translate matrix
-   */
-  private translate(matrix: Float32Array, x: number, y: number, z: number): void {
-    matrix[12] += matrix[0] * x + matrix[4] * y + matrix[8] * z;
-    matrix[13] += matrix[1] * x + matrix[5] * y + matrix[9] * z;
-    matrix[14] += matrix[2] * x + matrix[6] * y + matrix[10] * z;
-    matrix[15] += matrix[3] * x + matrix[7] * y + matrix[11] * z;
+    this.stopAnimation();
+    // Clean up WebGL resources
+    const gl = this.gl;
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   }
 }

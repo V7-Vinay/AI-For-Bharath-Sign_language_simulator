@@ -1,6 +1,6 @@
 /**
  * Popup UI for Chrome Extension
- * Provides user interface for controlling the extension
+ * Provides settings and control interface
  */
 
 import React, { useState, useEffect } from 'react';
@@ -9,60 +9,60 @@ import { createRoot } from 'react-dom/client';
 interface Preferences {
   language: string;
   signLanguage: string;
-  avatarCustomization: {
-    skinTone: string;
-    clothing: string;
-    hairStyle: string;
-  };
+  avatarSkinTone: string;
+  avatarClothing: string;
+  avatarSize: string;
 }
 
 const Popup: React.FC = () => {
   const [isActive, setIsActive] = useState(false);
-  const [preferences, setPreferences] = useState<Preferences | null>(null);
-  const [latency, setLatency] = useState<number>(0);
+  const [preferences, setPreferences] = useState<Preferences>({
+    language: 'en',
+    signLanguage: 'ASL',
+    avatarSkinTone: 'medium',
+    avatarClothing: 'casual',
+    avatarSize: 'medium'
+  });
 
   useEffect(() => {
-    // Load preferences
-    chrome.runtime.sendMessage({ type: 'GET_PREFERENCES' }, (response) => {
-      if (response && response.preferences) {
-        setPreferences(response.preferences);
-      }
-    });
+    loadPreferences();
   }, []);
 
-  const handleToggle = () => {
-    if (isActive) {
-      // Stop transcription
-      chrome.runtime.sendMessage({ type: 'STOP_TRANSCRIPTION' }, (response) => {
+  const loadPreferences = async () => {
+    chrome.runtime.sendMessage(
+      { type: 'GET_PREFERENCES' },
+      (response) => {
         if (response.success) {
-          setIsActive(false);
+          setPreferences(response.data);
         }
-      });
-    } else {
-      // Start transcription
-      chrome.runtime.sendMessage({ type: 'START_TRANSCRIPTION' }, (response) => {
+      }
+    );
+  };
+
+  const savePreferences = async () => {
+    chrome.runtime.sendMessage(
+      { type: 'SAVE_PREFERENCES', data: preferences },
+      (response) => {
         if (response.success) {
-          setIsActive(true);
+          alert('Preferences saved!');
         }
-      });
+      }
+    );
+  };
+
+  const handleStart = async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab.id) {
+      chrome.tabs.sendMessage(tab.id, { type: 'START' });
+      setIsActive(true);
     }
   };
 
-  const handleLanguageChange = (language: string) => {
-    if (preferences) {
-      const updated = { ...preferences, language };
-      setPreferences(updated);
-      // Save to storage
-      chrome.storage.local.set({ preferences: updated });
-    }
-  };
-
-  const handleSignLanguageChange = (signLanguage: string) => {
-    if (preferences) {
-      const updated = { ...preferences, signLanguage };
-      setPreferences(updated);
-      // Save to storage
-      chrome.storage.local.set({ preferences: updated });
+  const handleStop = async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab.id) {
+      chrome.tabs.sendMessage(tab.id, { type: 'STOP' });
+      setIsActive(false);
     }
   };
 
@@ -71,15 +71,15 @@ const Popup: React.FC = () => {
       <h2>Accessibility AI</h2>
       
       <div style={{ marginBottom: '20px' }}>
-        <button 
-          onClick={handleToggle}
+        <button
+          onClick={isActive ? handleStop : handleStart}
           style={{
             width: '100%',
             padding: '10px',
             backgroundColor: isActive ? '#dc3545' : '#28a745',
             color: 'white',
             border: 'none',
-            borderRadius: '5px',
+            borderRadius: '4px',
             cursor: 'pointer'
           }}
         >
@@ -87,25 +87,12 @@ const Popup: React.FC = () => {
         </button>
       </div>
 
-      {latency > 500 && (
-        <div style={{ 
-          padding: '10px', 
-          backgroundColor: '#fff3cd', 
-          borderRadius: '5px',
-          marginBottom: '10px'
-        }}>
-          ⚠️ High latency detected: {latency}ms
-        </div>
-      )}
-
       <div style={{ marginBottom: '15px' }}>
-        <label style={{ display: 'block', marginBottom: '5px' }}>
-          Language:
-        </label>
-        <select 
-          value={preferences?.language || 'en'}
-          onChange={(e) => handleLanguageChange(e.target.value)}
-          style={{ width: '100%', padding: '5px' }}
+        <label>Language:</label>
+        <select
+          value={preferences.language}
+          onChange={(e) => setPreferences({ ...preferences, language: e.target.value })}
+          style={{ width: '100%', padding: '5px', marginTop: '5px' }}
         >
           <option value="en">English</option>
           <option value="es">Spanish</option>
@@ -116,23 +103,57 @@ const Popup: React.FC = () => {
       </div>
 
       <div style={{ marginBottom: '15px' }}>
-        <label style={{ display: 'block', marginBottom: '5px' }}>
-          Sign Language:
-        </label>
-        <select 
-          value={preferences?.signLanguage || 'ASL'}
-          onChange={(e) => handleSignLanguageChange(e.target.value)}
-          style={{ width: '100%', padding: '5px' }}
+        <label>Sign Language:</label>
+        <select
+          value={preferences.signLanguage}
+          onChange={(e) => setPreferences({ ...preferences, signLanguage: e.target.value })}
+          style={{ width: '100%', padding: '5px', marginTop: '5px' }}
         >
           <option value="ASL">ASL (American)</option>
           <option value="BSL">BSL (British)</option>
         </select>
       </div>
 
-      <div style={{ fontSize: '12px', color: '#666', marginTop: '20px' }}>
-        <p>Status: {isActive ? 'Active' : 'Inactive'}</p>
-        {latency > 0 && <p>Latency: {latency}ms</p>}
+      <div style={{ marginBottom: '15px' }}>
+        <label>Avatar Skin Tone:</label>
+        <select
+          value={preferences.avatarSkinTone}
+          onChange={(e) => setPreferences({ ...preferences, avatarSkinTone: e.target.value })}
+          style={{ width: '100%', padding: '5px', marginTop: '5px' }}
+        >
+          <option value="light">Light</option>
+          <option value="medium">Medium</option>
+          <option value="dark">Dark</option>
+        </select>
       </div>
+
+      <div style={{ marginBottom: '15px' }}>
+        <label>Avatar Size:</label>
+        <select
+          value={preferences.avatarSize}
+          onChange={(e) => setPreferences({ ...preferences, avatarSize: e.target.value })}
+          style={{ width: '100%', padding: '5px', marginTop: '5px' }}
+        >
+          <option value="small">Small</option>
+          <option value="medium">Medium</option>
+          <option value="large">Large</option>
+        </select>
+      </div>
+
+      <button
+        onClick={savePreferences}
+        style={{
+          width: '100%',
+          padding: '10px',
+          backgroundColor: '#007bff',
+          color: 'white',
+          border: 'none',
+          borderRadius: '4px',
+          cursor: 'pointer'
+        }}
+      >
+        Save Settings
+      </button>
     </div>
   );
 };
@@ -143,3 +164,5 @@ if (container) {
   const root = createRoot(container);
   root.render(<Popup />);
 }
+
+export default Popup;
