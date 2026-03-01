@@ -1,0 +1,20 @@
+{
+  "name": "sign-language-translator",
+  "version": "1.0.0",
+  "description": "AWS Lambda function for converting text to sign language animation sequences",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.450.0",
+    "@aws-sdk/client-dynamodb": "^3.450.0",
+    "@aws-sdk/lib-dynamodb": "^3.450.0",
+    "crypto": "^1.0.1"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.130",
+    "jest": "^29.7.0"
+  }
+}
