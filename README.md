@@ -1,6 +1,6 @@
 # Accessibility AI Serverless System
 
-A cost-optimized, serverless architecture providing real-time speech-to-text transcription and sign language translation for deaf and hard-of-hearing users. Built with AWS serverless services to operate within a strict $100/month budget while supporting up to 500 active users.
+A cost-optimized, serverless architecture providing real-time speech-to-text transcription and sign language translation for deaf and hard-of-hearing users. Built with AWS serverless services.
 
 ## 🎯 Project Overview
 
